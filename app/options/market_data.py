@@ -1,6 +1,3 @@
-from datetime import datetime
-
-
 class OptionMarketData:
 
     def __init__(self):
