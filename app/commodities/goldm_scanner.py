@@ -11,6 +11,7 @@ from kiteconnect import KiteConnect, KiteTicker
 from app.config.settings import KITE_API_KEY, KITE_ACCESS_TOKEN
 from app.dashboard.goldm_publisher import publish_goldm
 from app.commodities.goldm_engine import GoldMShadowEngine
+from app.commodities.goldm_strategy_comparison import compare_strategies
 
 IST = ZoneInfo("Asia/Kolkata")
 CACHE = Path(__file__).resolve().parents[2] / "data" / "goldm_mcx_instruments.csv"
@@ -70,10 +71,13 @@ class GoldMScanner:
             "future_expiry": None, "option_expiry": None, "options": [],
             "tracked_count": 0, "last_tick_time": None,
             "message": "GOLDM scanner initializing", "scoring_status": "SHADOW MODE: experimental scores only; not calibrated",
+            "strategy_comparison": {"status": "NO_TRADE", "best_candidate": None, "strategies": {}},
         }
 
     def _publish(self, message=None):
         with self.lock:
+            comparison = compare_strategies(list(self.engine.future_history), self._option_rows(), time.time())
+            self.state["strategy_comparison"] = comparison
             payload = dict(self.state)
             if message:
                 payload["message"] = message
@@ -149,6 +153,15 @@ class GoldMScanner:
                 "strike": None if pd.isna(contract["strike"]) else float(contract["strike"]),
                 "expiry": str(contract["expiry_date"]),
                 "ltp": tick.get("last_price"),
+                "best_bid": tick.get("best_bid"),
+                "best_ask": tick.get("best_ask"),
+                "spread_percent": (
+                    (float(tick["best_ask"]) - float(tick["best_bid"]))
+                    / ((float(tick["best_ask"]) + float(tick["best_bid"])) / 2.0) * 100.0
+                    if tick.get("best_bid") and tick.get("best_ask")
+                    and float(tick["best_bid"]) > 0 and float(tick["best_ask"]) >= float(tick["best_bid"])
+                    else None
+                ),
                 "oi": tick.get("oi"),
                 "volume": tick.get("volume"),
                 "change_percent": tick.get("change_percent"),
@@ -191,6 +204,7 @@ class GoldMScanner:
     def on_ticks(self, ws, ticks):
         future_token = int(self.future["instrument_token"])
         future_price = None
+        future_tick_received = False
         with self.lock:
             for tick in ticks:
                 token = int(tick.get("instrument_token", 0))
@@ -199,9 +213,16 @@ class GoldMScanner:
                     "oi": tick.get("oi"),
                     "change_percent": tick.get("change"),
                     "volume": tick.get("volume_traded", tick.get("volume")),
+                    "best_bid": (tick.get("depth", {}).get("buy") or [{}])[0].get("price"),
+                    "best_ask": (tick.get("depth", {}).get("sell") or [{}])[0].get("price"),
                 }
-                if token == future_token:
-                    future_price = tick.get("last_price")
+
+            if token == future_token:
+                tick_price = tick.get("last_price")
+                if tick_price is not None and float(tick_price) > 0:
+                    future_price = float(tick_price)
+                    future_tick_received = True
+
             if future_price is None:
                 future_price = self.state.get("future_ltp")
             if future_price is not None:

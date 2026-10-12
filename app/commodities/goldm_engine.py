@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 RISK_FREE_RATE = 0.065  # Modeling assumption; not calibrated for trading.
 HISTORY_SECONDS = 180
+FUTURE_HISTORY_SECONDS = 240
 RECENT_SECONDS = 30
 MIN_OBSERVATIONS = 5
 MIN_RECENT_OBSERVATIONS = 3
@@ -102,7 +103,10 @@ class GoldMShadowEngine:
             if self.future_history and timestamp <= self.future_history[-1][0]:
                 return False
             self.future_history.append((timestamp, float(price)))
-            while self.future_history and timestamp - self.future_history[0][0] > HISTORY_SECONDS:
+            while (
+                    self.future_history
+                    and timestamp - self.future_history[0][0] > FUTURE_HISTORY_SECONDS
+            ):
                 self.future_history.popleft()
             return True
         return False
