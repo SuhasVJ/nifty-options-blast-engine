@@ -1,5 +1,6 @@
 import threading
 import time
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,15 @@ from app.options.state_manager import OptionStateManager
 from app.options.greeks_service import GreeksService
 from app.options.blast_score import BlastScoreEngine
 from app.options.tick_validation import is_valid_price
+
+from app.dashboard.publisher import (
+    install_console_capture,
+    publish_connection,
+    publish_diagnostics,
+    publish_report,
+    publish_snapshot,
+)
+from app.dashboard.nifty_server import start_dashboard
 
 IST = ZoneInfo("Asia/Kolkata")
 NIFTY_50_TOKEN = 256265
@@ -48,6 +58,14 @@ candidate_lock = threading.RLock()
 
 last_report_time = 0.0
 last_warmup_message_time = 0.0
+last_diagnostic_time = 0.0
+
+DIAGNOSTIC_INTERVAL_SECONDS = 30
+
+diagnostic_counts = Counter()
+diagnostic_statuses = Counter()
+# Counts FILTERED scoring outcomes by CE/PE tick evaluations.
+diagnostic_filtered_by_type = Counter()
 
 # True only after the option universe is successfully reconciled.
 option_universe_synced = False
@@ -194,41 +212,68 @@ def subscribe_options_if_needed(ws, nifty_price):
     print("========================================\n")
 
 
+
 def process_option_tick(tick, metadata):
+    diagnostic_counts["option_ticks_received"] += 1
+
     if not option_universe_synced:
+        diagnostic_counts["skipped_universe_not_synced"] += 1
         return
 
     token = int(tick["instrument_token"])
-
     raw_ltp = tick.get("last_price")
 
     if not is_valid_price(raw_ltp):
+        diagnostic_counts["invalid_option_prices"] += 1
         return
 
     if not is_valid_price(current_nifty_price):
+        diagnostic_counts["invalid_nifty_prices"] += 1
         return
 
     state = state_manager.update(tick)
 
     if state is None:
+        diagnostic_counts["invalid_option_state_updates"] += 1
         return
 
     ltp = state.last_price
 
     if not is_valid_price(ltp):
+        diagnostic_counts["invalid_state_prices"] += 1
         return
 
-    # Wait until option history covers the required time windows
-    # and the underlying has enough history for alignment.
+    # Check option and underlying history readiness.
     nifty_state = state_manager.get_nifty()
 
+    has_5s = state.has_history(5)
+    has_30s = state.has_history(30)
+    has_60s = state.has_history(60)
+    nifty_has_30s = nifty_state.has_history(30)
+
+    if not has_5s:
+        diagnostic_counts["missing_option_5s_history"] += 1
+
+    if not has_30s:
+        diagnostic_counts["missing_option_30s_history"] += 1
+
+    if not has_60s:
+        diagnostic_counts["missing_option_60s_history"] += 1
+
+    if not nifty_has_30s:
+        diagnostic_counts["missing_nifty_30s_history"] += 1
+
     data_ready = (
-            state.has_history(5)
-            and state.has_history(30)
-            and state.has_history(60)
-            and nifty_state.has_history(30)
+            has_5s
+            and has_30s
+            and has_60s
+            and nifty_has_30s
     )
 
+    if not data_ready:
+        diagnostic_counts["insufficient_history"] += 1
+
+    # Calculate Greeks.
     greeks = greeks_service.calculate(
         spot=current_nifty_price,
         strike=metadata["strike"],
@@ -238,10 +283,50 @@ def process_option_tick(tick, metadata):
     )
 
     if greeks is None:
+        diagnostic_counts["greeks_failed"] += 1
+
         with candidate_lock:
             latest_scores.pop(token, None)
+
         return
 
+    # Print only the first 10 successful Greek calculations.
+    if diagnostic_counts["greeks_samples"] < 10:
+        diagnostic_counts["greeks_samples"] += 1
+
+        print(
+            "GREEKS SAMPLE | "
+            f"{metadata['tradingsymbol']} | "
+            f"LTP={ltp:.2f} | "
+            f"IV={greeks['iv'] * 100:.2f}% | "
+            f"Delta={greeks['delta']:+.4f} | "
+            f"Gamma={greeks['gamma']:.7f}"
+        )
+
+    # Count eligibility filters only when market history is ready.
+    # These checks do not change the existing scoring rules.
+    if data_ready:
+        delta = abs(greeks.get("delta", 0))
+        iv = greeks.get("iv", 0)
+        gamma = greeks.get("gamma", 0)
+
+        if delta <= 0.30:
+            diagnostic_counts["filter_delta"] += 1
+
+        if not (0 < iv < 0.15):
+            diagnostic_counts["filter_iv"] += 1
+
+        if gamma <= 0.0012:
+            diagnostic_counts["filter_gamma"] += 1
+
+        if (
+                delta > 0.30
+                and 0 < iv < 0.15
+                and gamma > 0.0012
+        ):
+            diagnostic_counts["passed_all_filters"] += 1
+
+    # Calculate market movement and activity features.
     price_5s = state.price_change_pct(5)
     price_30s = state.price_change_pct(30)
     oi_30s = state.oi_change_pct(30)
@@ -262,10 +347,24 @@ def process_option_tick(tick, metadata):
     )
 
     if result["score"] is None:
+        diagnostic_counts["score_rejected"] += 1
+        result_status = str(result.get("status", "UNKNOWN"))
+        diagnostic_statuses[result_status] += 1
+
+        if result_status == "FILTERED":
+            diagnostic_filtered_by_type[metadata["option_type"]] += 1
+
         with candidate_lock:
             latest_scores.pop(token, None)
+
         return
 
+    diagnostic_counts["successful_scores"] += 1
+    diagnostic_statuses[
+        str(result.get("status", "UNKNOWN"))
+    ] += 1
+
+    # Publish the latest score for this option.
     with candidate_lock:
         latest_scores[token] = {
             "updated_at": time.monotonic(),
@@ -282,7 +381,6 @@ def process_option_tick(tick, metadata):
             "score": result["score"],
             "status": result["status"],
         }
-
 
 
 def cleanup_stale_candidates():
@@ -313,6 +411,13 @@ def print_candidate_report():
     # Take a consistent snapshot while holding the lock.
     with candidate_lock:
         candidates_snapshot = list(latest_scores.values())
+
+    publish_report(
+        candidates=candidates_snapshot,
+        nifty=current_nifty_price,
+        expiry=current_expiry,
+        atm=current_atm,
+    )
 
     print("\n" + "=" * 76)
     print(
@@ -385,6 +490,9 @@ def on_connect(ws, response):
     last_report_time = 0.0
     last_warmup_message_time = 0.0
 
+    publish_connection(True)
+    publish_snapshot({"market": {"last_tick_time": None}})
+
     print("WebSocket connected successfully")
     print("Previous market history and candidates cleared.")
 
@@ -395,9 +503,17 @@ def on_connect(ws, response):
     print("Waiting for fresh market history to accumulate...")
 
 
+
 def on_ticks(ws, ticks):
     global current_nifty_price
     global last_report_time, last_warmup_message_time
+    global last_diagnostic_time
+
+    publish_snapshot({
+        "market": {
+            "last_tick_time": datetime.now(IST).strftime("%H:%M:%S IST"),
+        }
+    })
 
     for tick in ticks:
         try:
@@ -420,7 +536,9 @@ def on_ticks(ws, ticks):
                 nifty_state = state_manager.update_nifty(tick)
 
                 if nifty_state is None:
-                    print("WARNING: Ignoring invalid or out-of-order NIFTY tick.")
+                    print(
+                        "WARNING: Ignoring invalid or out-of-order NIFTY tick."
+                    )
                     continue
 
                 current_nifty_price = nifty_state.last_price
@@ -454,10 +572,75 @@ def on_ticks(ws, ticks):
 
     now = time.monotonic()
 
+    # Print diagnostic counters every 30 seconds.
+    if now - last_diagnostic_time >= DIAGNOSTIC_INTERVAL_SECONDS:
+        last_diagnostic_time = now
+
+        print("\n--- BLAST SCORE DIAGNOSTICS ---")
+        print(
+            f"Option ticks received: "
+            f"{diagnostic_counts['option_ticks_received']}"
+        )
+        print(
+            f"Universe not synced: "
+            f"{diagnostic_counts['skipped_universe_not_synced']}"
+        )
+        print(
+            f"Missing option 5s history: "
+            f"{diagnostic_counts['missing_option_5s_history']}"
+        )
+        print(
+            f"Missing option 30s history: "
+            f"{diagnostic_counts['missing_option_30s_history']}"
+        )
+        print(
+            f"Missing option 60s history: "
+            f"{diagnostic_counts['missing_option_60s_history']}"
+        )
+        print(
+            f"Missing NIFTY 30s history: "
+            f"{diagnostic_counts['missing_nifty_30s_history']}"
+        )
+        print(
+            f"Insufficient history: "
+            f"{diagnostic_counts['insufficient_history']}"
+        )
+        print(
+            f"Greeks failures: "
+            f"{diagnostic_counts['greeks_failed']}"
+        )
+        print(
+            f"Rejected scores: "
+            f"{diagnostic_counts['score_rejected']}"
+        )
+        print(f"Delta filter rejections: {diagnostic_counts['filter_delta']}")
+        print(f"IV filter rejections: {diagnostic_counts['filter_iv']}")
+        print(f"Gamma filter rejections: {diagnostic_counts['filter_gamma']}")
+        print(f"Passed all filters: {diagnostic_counts['passed_all_filters']}")
+        print(
+            f"Successful scores: "
+            f"{diagnostic_counts['successful_scores']}"
+        )
+        print(f"Scoring statuses: {dict(diagnostic_statuses)}")
+        print(
+            "FILTERED by option type (tick evaluations): "
+            f"CE={diagnostic_filtered_by_type['CE']} | "
+            f"PE={diagnostic_filtered_by_type['PE']}"
+        )
+        publish_diagnostics(
+            statuses=dict(diagnostic_statuses),
+            filtered_by_type=dict(diagnostic_filtered_by_type),
+            counters=dict(diagnostic_counts),
+        )
+        print("-------------------------------")
+
+    # Print candidate reports or the existing warm-up message.
     if now - last_report_time >= REPORT_INTERVAL_SECONDS:
         last_report_time = now
+
         with candidate_lock:
             has_candidates = bool(latest_scores)
+
         if has_candidates:
             print_candidate_report()
         elif now - last_warmup_message_time >= 30:
@@ -473,6 +656,7 @@ def on_error(ws, code, reason):
 
 
 def on_close(ws, code, reason):
+    publish_connection(False)
     print(f"WebSocket closed: code={code}, reason={reason}")
 
 
@@ -484,6 +668,7 @@ def on_reconnect(ws, attempts_count):
 
 
 def on_noreconnect(ws):
+    publish_connection(False)
     print(
         "CRITICAL: WebSocket reconnection attempts exhausted. "
         "Scanner may no longer receive live updates. "
@@ -517,6 +702,9 @@ def stale_candidate_cleanup_loop(stop_event=None):
 def main():
     global instrument_df
 
+    install_console_capture()
+    start_dashboard(host="127.0.0.1", port=8765)
+    print("Dashboard available at http://127.0.0.1:8765")
     print("\nStarting NIFTY Options Blast Engine...")
 
     if not KITE_API_KEY or not KITE_ACCESS_TOKEN:
