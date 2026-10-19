@@ -159,11 +159,26 @@ class NaturalGasScanner:
         now = datetime.now(IST)
         results = {}
         ltp = None
+        latest_intraday_time = None
+        intraday_stale = False
         for timeframe, interval in (("intraday", "5minute"), ("swing", "15minute")):
             candles = _candles(self.kite, token, interval)
             if candles.empty:
                 results[timeframe] = {"direction": "WAIT", "status": "NO_CANDLES",
                                       "reasons": ["No completed historical candles returned"]}
+                continue
+            latest_time = candles.iloc[-1]["date"]
+            if timeframe == "intraday":
+                latest_intraday_time = latest_time
+            stale_after = timedelta(minutes=25 if timeframe == "intraday" else 60)
+            if now - latest_time.to_pydatetime() > stale_after:
+                if timeframe == "intraday":
+                    intraday_stale = True
+                results[timeframe] = {"direction": "WAIT", "status": "STALE_DATA",
+                                      "timestamp": str(latest_time), "entry": None, "stop_loss": None,
+                                      "target_1": None, "target_2": None, "confidence": 0,
+                                      "reasons": [f"Latest completed {interval} candle is older than {int(stale_after.total_seconds() / 60)} minutes"]}
+                ltp = float(candles.iloc[-1]["close"])
                 continue
             signal = evaluate_latest(candles, timeframe).to_dict()
             if timeframe == "swing" and signal.get("direction") in {"BUY", "SELL"}:
@@ -193,10 +208,11 @@ class NaturalGasScanner:
                 self._persist_signal(signal, contract["tradingsymbol"], contract["expiry_date"])
         self._publish(
             connected=True, symbol=str(contract["tradingsymbol"]), expiry=str(contract["expiry_date"]),
-            ltp=ltp, last_data_time=now.isoformat(timespec="seconds"),
-            updated_at=now.isoformat(timespec="seconds"), status="CONNECTED",
-            message=("Contract changed; new expiry selected" if changed and ltp is not None
-                     else "Completed-candle analysis updated"),
+            ltp=ltp, last_data_time=(latest_intraday_time.isoformat() if latest_intraday_time is not None else None),
+            updated_at=now.isoformat(timespec="seconds"), status=("STALE_DATA" if intraday_stale else "CONNECTED"),
+            message=("Latest intraday candle is stale; actionable signal suppressed" if intraday_stale
+                     else ("Contract changed; new expiry selected" if changed and ltp is not None
+                           else "Completed-candle analysis updated")),
             signals=results,
         )
 
