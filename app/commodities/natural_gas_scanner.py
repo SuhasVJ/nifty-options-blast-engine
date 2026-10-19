@@ -143,8 +143,9 @@ class NaturalGasScanner:
         if key in self.last_signal_keys:
             return
         self.last_signal_keys.add(key)
-        record["reasons"] = json.dumps(record.get("reasons", []), ensure_ascii=False)
-        frame = pd.DataFrame([record])
+        csv_record = dict(record)
+        csv_record["reasons"] = json.dumps(record.get("reasons", []), ensure_ascii=False)
+        frame = pd.DataFrame([csv_record])
         frame.to_csv(HISTORY, mode="a", header=not HISTORY.exists(), index=False)
         with self.lock:
             self.state["history"] = ([record] + self.state["history"])[:100]
