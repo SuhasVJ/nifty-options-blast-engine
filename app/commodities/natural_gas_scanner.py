@@ -9,7 +9,7 @@ import pandas as pd
 from kiteconnect import KiteConnect
 
 from app.config.settings import KITE_API_KEY, KITE_ACCESS_TOKEN
-from app.commodities.natural_gas_engine import evaluate_latest
+from app.commodities.natural_gas_engine import add_indicators, evaluate_latest
 from app.dashboard.natural_gas_publisher import publish_natural_gas
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -133,7 +133,6 @@ class NaturalGasScanner:
         token = int(contract["instrument_token"])
         now = datetime.now(IST)
         results = {}
-        all_signals = {}
         ltp = None
         for timeframe, interval in (("intraday", "5minute"), ("swing", "15minute")):
             candles = _candles(self.kite, token, interval)
@@ -142,10 +141,30 @@ class NaturalGasScanner:
                                       "reasons": ["No completed historical candles returned"]}
                 continue
             signal = evaluate_latest(candles, timeframe).to_dict()
+            if timeframe == "swing" and signal.get("direction") in {"BUY", "SELL"}:
+                hourly = _candles(self.kite, token, "60minute")
+                if hourly.empty or len(hourly) < 35:
+                    signal.update({"direction": "WAIT", "entry": None, "stop_loss": None,
+                                   "target_1": None, "target_2": None, "risk_reward_target_1": None,
+                                   "status": "WAITING_FOR_HOURLY_CONFIRMATION",
+                                   "reasons": ["15-minute setup found; insufficient completed 60-minute candles for trend confirmation"]})
+                else:
+                    trend = add_indicators(hourly).iloc[-1]
+                    aligned = (
+                        float(trend["ema9"]) > float(trend["ema21"]) and float(trend["close"]) > float(trend["vwap"])
+                        if signal["direction"] == "BUY" else
+                        float(trend["ema9"]) < float(trend["ema21"]) and float(trend["close"]) < float(trend["vwap"])
+                    )
+                    if not aligned:
+                        signal.update({"direction": "WAIT", "entry": None, "stop_loss": None,
+                                       "target_1": None, "target_2": None, "risk_reward_target_1": None,
+                                       "status": "HOURLY_TREND_NOT_CONFIRMED",
+                                       "reasons": ["15-minute setup rejected: 60-minute EMA trend and VWAP do not confirm direction"]})
+                    else:
+                        signal["reasons"] = list(signal.get("reasons", [])) + ["Confirmed by 60-minute EMA trend and VWAP"]
             results[timeframe] = signal
-            all_signals[timeframe] = signal
             ltp = float(candles.iloc[-1]["close"])
-            if signal.get("status") == "CLOSED_CANDLE_SIGNAL":
+            if signal.get("status") == "CLOSED_CANDLE_SIGNAL" and signal.get("direction") in {"BUY", "SELL"}:
                 self._persist_signal(signal, contract["tradingsymbol"], contract["expiry_date"])
         self._publish(
             connected=True, symbol=str(contract["tradingsymbol"]), expiry=str(contract["expiry_date"]),
