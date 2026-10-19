@@ -1,4 +1,5 @@
 """MCX Natural Gas futures scanner. Signal-only; never places orders."""
+import json
 import threading
 import time
 from datetime import datetime, timedelta
@@ -105,6 +106,28 @@ class NaturalGasScanner:
         }
         self.contract = None
         self.last_signal_keys = set()
+        self._load_history()
+
+    def _load_history(self):
+        if not HISTORY.exists():
+            return
+        try:
+            frame = pd.read_csv(HISTORY).tail(100)
+            records = frame.where(pd.notna(frame), None).to_dict(orient="records")
+            for record in records:
+                raw_reasons = record.get("reasons")
+                if isinstance(raw_reasons, str):
+                    try:
+                        record["reasons"] = json.loads(raw_reasons)
+                    except (ValueError, TypeError):
+                        record["reasons"] = [raw_reasons] if raw_reasons else []
+                self.last_signal_keys.add((
+                    record.get("timeframe"), str(record.get("timestamp")),
+                    record.get("direction"), record.get("symbol")
+                ))
+            self.state["history"] = list(reversed(records))
+        except (OSError, ValueError, pd.errors.ParserError) as exc:
+            print(f"Natural Gas signal history could not be loaded: {type(exc).__name__}: {exc}")
 
     def _publish(self, **updates):
         with self.lock:
@@ -120,6 +143,7 @@ class NaturalGasScanner:
         if key in self.last_signal_keys:
             return
         self.last_signal_keys.add(key)
+        record["reasons"] = json.dumps(record.get("reasons", []), ensure_ascii=False)
         frame = pd.DataFrame([record])
         frame.to_csv(HISTORY, mode="a", header=not HISTORY.exists(), index=False)
         with self.lock:
@@ -164,7 +188,7 @@ class NaturalGasScanner:
                         signal["reasons"] = list(signal.get("reasons", [])) + ["Confirmed by 60-minute EMA trend and VWAP"]
             results[timeframe] = signal
             ltp = float(candles.iloc[-1]["close"])
-            if signal.get("status") == "CLOSED_CANDLE_SIGNAL" and signal.get("direction") in {"BUY", "SELL"}:
+            if signal.get("timestamp"):
                 self._persist_signal(signal, contract["tradingsymbol"], contract["expiry_date"])
         self._publish(
             connected=True, symbol=str(contract["tradingsymbol"]), expiry=str(contract["expiry_date"]),
