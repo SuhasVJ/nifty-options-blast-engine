@@ -111,12 +111,12 @@ def evaluate_latest(candles: pd.DataFrame, timeframe: str = "intraday") -> Signa
     # Balanced: require trend + momentum + price structure, not just indicator votes.
     direction: Direction = "WAIT"
     reasons: list[str] = []
-    if buy_score >= 5 and buy_checks[0] and buy_checks[1] and buy_checks[2] and buy_checks[3]:
+    if buy_score >= 5 and buy_checks[0] and buy_checks[1] and buy_checks[2] and buy_checks[3] and volume_ok:
         direction = "BUY"
         reasons = ["Close above VWAP", "EMA9 above EMA21", "RSI confirms bullish momentum",
                    "20-candle resistance breakout", "Volume confirmation" if volume_ok else "Volume below confirmation threshold"]
         score = buy_score
-    elif sell_score >= 5 and sell_checks[0] and sell_checks[1] and sell_checks[2] and sell_checks[3]:
+    elif sell_score >= 5 and sell_checks[0] and sell_checks[1] and sell_checks[2] and sell_checks[3] and volume_ok:
         direction = "SELL"
         reasons = ["Close below VWAP", "EMA9 below EMA21", "RSI confirms bearish momentum",
                    "20-candle support breakdown", "Volume confirmation" if volume_ok else "Volume below confirmation threshold"]
