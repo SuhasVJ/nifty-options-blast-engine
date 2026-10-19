@@ -126,7 +126,7 @@ def run_backtest(
         trade_count=len(trades),
         win_rate_percent=round(100 * len(wins) / len(trades), 2) if trades else 0.0,
         expectancy_r=round(sum(t["r_multiple"] for t in trades) / len(trades), 4) if trades else 0.0,
-        profit_factor=round(gross_wins / gross_losses, 4) if gross_losses else (None if not gross_wins else float("inf")),
+        profit_factor=round(gross_wins / gross_losses, 4) if gross_losses else None,
         max_drawdown_r=round(max_drawdown, 4),
         net_r=round(sum(t["r_multiple"] for t in trades), 4),
         assumptions=[
