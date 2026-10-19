@@ -38,9 +38,9 @@ function setSignal(mode,s){
 }
 function render(payload){
  const s=payload?.natural_gas||{};
- const connected=s.status==="CONNECTED"&&s.connected;
+ const connected=(s.status==="CONNECTED"||s.status==="STALE_DATA")&&s.connected;
  $("connection").className="dot"+(connected?" live":"");
- $("connectionText").textContent=connected?"Scanner connected":(s.status||"Disconnected");
+ $("connectionText").textContent=connected?(s.status==="STALE_DATA"?"Connected · stale data":"Scanner connected"):(s.status||"Disconnected");
  $("symbol").textContent=s.symbol||"—";$("expiry").textContent=s.expiry||"—";$("ltp").textContent=fmt(s.ltp);
  $("updated").textContent="Updated: "+time(s.updated_at||payload.updated_at);
  $("source").textContent=s.data_source||"Kite Connect";
