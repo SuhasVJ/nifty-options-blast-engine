@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCX Natural Gas Signals</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1120;--panel:#121d30;--line:#293750;--muted:#9aa9c0;--text:#edf3ff;--green:#48d6a0;--red:#ff7185;--amber:#f4c66d;--blue:#86b7ff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#1a2b46,#0b1120 60%);color:var(--text);font:14px/1.45 "Segoe UI",Arial,sans-serif}.wrap{max-width:1250px;margin:auto;padding:24px}header{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:20px}h1{font-size:22px;letter-spacing:.03em;margin:0}.sub,.muted{color:var(--muted);font-size:12px}.tag{font-size:10px;color:var(--muted);border:1px solid var(--line);padding:4px 8px;border-radius:20px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--red);margin-right:7px}.dot.live{background:var(--green)}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px;margin-bottom:15px}.card{background:linear-gradient(180deg,#152239,#111a2a);border:1px solid var(--line);border-radius:15px;padding:16px;min-width:0}.label{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}.big{font-size:24px;font-weight:750;margin:7px 0;overflow-wrap:anywhere}.layout{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px;margin-bottom:15px}.signal{font-size:22px;font-weight:800;letter-spacing:.04em}.BUY{color:var(--green)}.SELL{color:var(--red)}.WAIT{color:var(--amber)}.levels{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:14px}.level{padding:9px;background:#0c1525;border:1px solid #26334a;border-radius:9px}.level strong{display:block;margin-top:4px;font-size:14px}.reasons{margin:12px 0 0;padding-left:18px;color:#c8d5e9;font-size:12px}.reasons li{margin:4px 0}.pill{display:inline-block;padding:4px 8px;border-radius:8px;font-size:11px;background:#263149;color:#dbe7fa}.warn{border-color:#715d35;background:linear-gradient(180deg,#29251d,#171c29)}.tablewrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:12px;white-space:nowrap}th,td{padding:10px 8px;border-bottom:1px solid #26334a;text-align:left}th{color:var(--muted);font-weight:600}.empty{text-align:center;color:var(--muted);padding:22px}.foot{color:var(--muted);font-size:11px;margin-top:15px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.status{font-size:12px;color:var(--muted);margin-top:8px}.progress{height:5px;background:#26334a;border-radius:9px;overflow:hidden;margin-top:10px}.progress>div{height:100%;background:var(--blue);width:0}
+@media(max-width:800px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.wrap{padding:14px}}@media(max-width:420px){.grid{grid-template-columns:1fr 1fr}.big{font-size:19px}.levels{grid-template-columns:1fr}}
+</style></head>
+<body><div class="wrap">
+<header><div><h1>MCX NATURAL GAS <span class="pill">SIGNALS ONLY</span></h1><div class="sub">Balanced trend + momentum · Zerodha Kite Connect · Manual execution only</div></div><div><span id="connection" class="dot"></span><span id="connectionText">Connecting to local scanner…</span><div class="sub" id="updated" style="margin-top:6px">Waiting for data</div></div></header>
+<div class="grid">
+<div class="card"><div class="label">Selected futures</div><div class="big" id="symbol">—</div><div class="sub">Standard Natural Gas · Mini excluded</div></div>
+<div class="card"><div class="label">Contract expiry</div><div class="big" id="expiry">—</div><div class="sub">Nearest unexpired contract</div></div>
+<div class="card"><div class="label">Last completed candle close</div><div class="big" id="ltp">—</div><div class="sub">Not an executable quote</div></div>
+<div class="card"><div class="label">Data freshness</div><div class="big" id="freshness">—</div><div class="sub" id="source">Historical candle polling</div></div>
+</div>
+<div class="layout">
+<div class="card" id="intradayCard"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><div><div class="label">Intraday setup</div><div class="signal WAIT" id="intradayDirection">WAIT</div></div><span class="tag">5-minute candles</span></div><div class="status" id="intradayMeta">Waiting for completed candle analysis</div><div class="levels"><div class="level"><span class="muted">Entry reference</span><strong id="intradayEntry">—</strong></div><div class="level"><span class="muted">Stop-loss</span><strong id="intradayStop">—</strong></div><div class="level"><span class="muted">Target 1 / 2</span><strong id="intradayTargets">—</strong></div></div><ul class="reasons" id="intradayReasons"><li>Waiting for data</li></ul></div>
+<div class="card" id="swingCard"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><div><div class="label">Swing setup</div><div class="signal WAIT" id="swingDirection">WAIT</div></div><span class="tag">15-minute candles</span></div><div class="status" id="swingMeta">Waiting for completed candle analysis</div><div class="levels"><div class="level"><span class="muted">Entry reference</span><strong id="swingEntry">—</strong></div><div class="level"><span class="muted">Stop-loss</span><strong id="swingStop">—</strong></div><div class="level"><span class="muted">Target 1 / 2</span><strong id="swingTargets">—</strong></div></div><ul class="reasons" id="swingReasons"><li>Waiting for data</li></ul></div>
+</div>
+<div class="card warn" style="margin-bottom:15px"><strong>Risk notice</strong><div class="sub" style="margin-top:5px;color:#e2d4b7">Signals are experimental and not validated for profitability. Entry is the completed signal-candle close, not a guaranteed fill. Confirm current quote, contract liquidity, tick size, charges and slippage before making any manual decision. WAIT means no setup met the configured rules. No orders are placed by this application.</div></div>
+<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px"><div><div style="font-weight:700">Recent signal history</div><div class="sub">Completed-candle evaluations · strategy balanced-v1</div></div><span class="tag" id="historyCount">0 records</span></div><div class="tablewrap"><table><thead><tr><th>Time</th><th>Mode</th><th>Signal</th><th>Entry</th><th>Stop</th><th>Target 1</th><th>Confidence</th><th>Reason</th></tr></thead><tbody id="history"><tr><td colspan="8" class="empty">No signal history yet</td></tr></tbody></table></div></div>
+<div class="foot"><span id="message">Starting scanner…</span><span>Local dashboard · Port 8767 · No order execution</span></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const fmt=v=>v===null||v===undefined||v===""?"—":(typeof v==="number"?v.toFixed(2):String(v));
+const time=v=>{if(!v)return "—";const d=new Date(v);return isNaN(d)?String(v):d.toLocaleString("en-IN",{timeZone:"Asia/Kolkata",hour12:false});};
+function setSignal(mode,s){
+ const p=mode.toLowerCase(); s=s||{};
+ const d=s.direction||"WAIT"; const node=$(p+"Direction");node.textContent=d;node.className="signal "+d;
+ $(p+"Entry").textContent=fmt(s.entry);
+ $(p+"Stop").textContent=fmt(s.stop_loss);
+ $(p+"Targets").textContent=(s.target_1==null&&s.target_2==null)?"—":fmt(s.target_1)+" / "+fmt(s.target_2);
+ $(p+"Meta").textContent=(s.timestamp?time(s.timestamp)+" · ":"")+"Confidence "+(s.confidence??0)+"% · "+(s.status||"NO SIGNAL");
+ const reasons=$(p+"Reasons");reasons.replaceChildren();
+ (s.reasons||["No completed-candle result available"]).forEach(x=>{const li=document.createElement("li");li.textContent=x;reasons.appendChild(li);});
+}
+function render(payload){
+ const s=payload?.natural_gas||{};
+ const connected=s.status==="CONNECTED"&&s.connected;
+ $("connection").className="dot"+(connected?" live":"");
+ $("connectionText").textContent=connected?"Scanner connected":(s.status||"Disconnected");
+ $("symbol").textContent=s.symbol||"—";$("expiry").textContent=s.expiry||"—";$("ltp").textContent=fmt(s.ltp);
+ $("updated").textContent="Updated: "+time(s.updated_at||payload.updated_at);
+ $("source").textContent=s.data_source||"Kite Connect";
+ $("message").textContent=s.message||"No status message";
+ $("freshness").textContent=s.last_data_time?time(s.last_data_time):"No data";
+ setSignal("intraday",s.signals?.intraday);setSignal("swing",s.signals?.swing);
+ const rows=s.history||[];$("historyCount").textContent=rows.length+" records";
+ const body=$("history");body.replaceChildren();
+ if(!rows.length){const tr=document.createElement("tr"),td=document.createElement("td");td.colSpan=8;td.className="empty";td.textContent="No signal history yet";tr.appendChild(td);body.appendChild(tr);return;}
+ rows.slice(0,100).forEach(r=>{const tr=document.createElement("tr");const vals=[time(r.timestamp),r.timeframe,r.direction,fmt(r.entry),fmt(r.stop_loss),fmt(r.target_1),(r.confidence??0)+"%",(r.reasons||[]).join("; ")];vals.forEach(v=>{const td=document.createElement("td");td.textContent=v??"—";tr.appendChild(td);});body.appendChild(tr);});
+}
+async function poll(){try{const r=await fetch("/api/state",{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);render(await r.json());}catch(e){$("connection").className="dot";$("connectionText").textContent="Dashboard API unavailable";$("message").textContent=e.message;}}
+poll();setInterval(poll,2000);
+</script></body></html>
