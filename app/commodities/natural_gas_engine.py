@@ -57,7 +57,7 @@ def add_indicators(candles: pd.DataFrame) -> pd.DataFrame:
         df["high"] - df["low"],
         (df["high"] - prev_close).abs(),
         (df["low"] - prev_close).abs(),
-    ], axis=1).max(axis=1)
+        ], axis=1).max(axis=1)
     df["atr"] = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     typical = (df["high"] + df["low"] + df["close"]) / 3
     # VWAP resets by exchange-local trading date.
@@ -98,7 +98,7 @@ def evaluate_latest(candles: pd.DataFrame, timeframe: str = "intraday") -> Signa
         breakout,
         volume_ok,
         float(row["close"]) >= float(previous["close"]),
-    ]
+        ]
     sell_checks = [
         float(row["close"]) < float(row["vwap"]),
         float(row["ema9"]) < float(row["ema21"]),
@@ -106,7 +106,7 @@ def evaluate_latest(candles: pd.DataFrame, timeframe: str = "intraday") -> Signa
         breakdown,
         volume_ok,
         float(row["close"]) <= float(previous["close"]),
-    ]
+        ]
     buy_score, sell_score = sum(buy_checks), sum(sell_checks)
     # Balanced: require trend + momentum + price structure, not just indicator votes.
     direction: Direction = "WAIT"

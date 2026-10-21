@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCX Crude Oil Signal Engine</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#121a2b;--line:#26344c;--muted:#94a3b8;--text:#e5edf8;--green:#22c55e;--red:#f87171;--amber:#fbbf24}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,Segoe UI,Arial,sans-serif}
+main{max-width:1400px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:20px;align-items:center;flex-wrap:wrap}
+h1{font-size:25px;margin:0}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}.pill{display:inline-block;padding:5px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:20px 0}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:17px;min-width:0}
+.metric{font-size:24px;font-weight:700;margin-top:6px;overflow-wrap:anywhere}.small{font-size:12px;color:var(--muted)}
+.columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.signal{font-size:22px;font-weight:800;margin:7px 0}.BUY{color:var(--green)}.SELL{color:var(--red)}.HOLD{color:var(--amber)}.NO{color:var(--muted)}
+.kv{display:grid;grid-template-columns:1fr auto;gap:6px;margin-top:12px}.kv span:nth-child(odd){color:var(--muted)}.reason{margin-top:12px;min-height:42px;color:#c7d2e2}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 9px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600;font-size:12px}td{overflow-wrap:anywhere}
+.note{margin-top:16px;color:var(--muted);font-size:12px}.error{color:var(--red)}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.columns{grid-template-columns:1fr}}@media(max-width:500px){main{padding:12px}.grid{grid-template-columns:1fr 1fr}.metric{font-size:19px}.panel{padding:13px}}
+</style>
+</head>
+<body><main>
+<div class="top"><div><h1>MCX Crude Oil Signal Engine</h1><div class="muted">5-minute futures monitoring · Zerodha Kite Connect</div></div><div><span id="status" class="pill">CONNECTING</span> <span id="clock" class="small"></span></div></div>
+<div class="grid">
+ <section class="panel"><div class="small">Selected contract</div><div class="metric" id="contract">—</div><div class="small" id="expiry">Expiry —</div></section>
+ <section class="panel"><div class="small">Live price</div><div class="metric" id="ltp">—</div><div class="small" id="change">Waiting for ticks</div></section>
+ <section class="panel"><div class="small">Combined signal</div><div class="signal NO" id="overall">NO TRADE</div><div class="small" id="overallReason">Waiting for data</div></section>
+ <section class="panel"><div class="small">Completed candles</div><div class="metric" id="candles">0</div><div class="small" id="lastCandle">Last candle —</div></section>
+</div>
+<div class="columns">
+ <section class="panel"><h2>Intraday Momentum</h2><div id="momentumSignal" class="signal NO">NO TRADE</div><div id="momentumReason" class="reason">Waiting for data</div><div id="momentumLevels" class="kv"></div></section>
+ <section class="panel"><h2>Trend Following</h2><div id="trendSignal" class="signal NO">NO TRADE</div><div id="trendReason" class="reason">Waiting for data</div><div id="trendLevels" class="kv"></div></section>
+ <section class="panel"><h2>Combined Decision</h2><div id="combinedSignal" class="signal NO">NO TRADE</div><div id="combinedReason" class="reason">Waiting for data</div><div id="combinedLevels" class="kv"></div></section>
+</div>
+<section class="panel" style="margin-top:12px"><h2>Recent confirmed combined signals</h2><div style="overflow-x:auto"><table><thead><tr><th>Signal</th><th>Candle time</th><th>Entry</th><th>Stop-loss</th><th>Target 1</th><th>Target 2</th><th>Reason</th></tr></thead><tbody id="history"><tr><td colspan="7" class="muted">No confirmed signals yet.</td></tr></tbody></table></div></section>
+<div class="note">Monitoring only — no orders are placed. Signals are rule-based observations, not guaranteed outcomes. Entry/stop/target values are indicative and do not account for slippage, brokerage or liquidity. Dashboard refreshes every 2 seconds.</div>
+<div id="message" class="note"></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+function fmt(v){return v===null||v===undefined||v===""?"—":Number(v).toLocaleString("en-IN",{maximumFractionDigits:2})}
+function time(v){if(!v)return "—";try{return new Date(v).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}catch{return v}}
+function cls(sig){return sig==="BUY"?"BUY":sig==="SELL"?"SELL":sig==="HOLD"?"HOLD":"NO"}
+function setSignal(id,sig){const e=$(id);e.textContent=sig||"NO TRADE";e.className="signal "+cls(sig)}
+function levels(id,s){const fields=[["Entry",s.entry],["Stop-loss",s.stop_loss],["Target 1",s.target_1],["Target 2",s.target_2],["RSI",s.rsi],["VWAP",s.vwap]];$(id).innerHTML=fields.map(([k,v])=>`<span>${k}</span><strong>${fmt(v)}</strong>`).join("")}
+function renderStrategy(prefix,s){setSignal(prefix+"Signal",s.signal);$(prefix+"Reason").textContent=s.reason||"—";levels(prefix+"Levels",s)}
+async function refresh(){try{
+ const r=await fetch("/api/state",{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);const d=await r.json();
+ $("status").textContent=d.status||"UNKNOWN";$("status").className="pill "+(d.connected?"BUY":"");$("clock").textContent="Updated "+time(d.updated_at);
+ $("contract").textContent=d.contract||"—";$("expiry").textContent="Expiry "+(d.expiry||"—");$("ltp").textContent=fmt(d.ltp);
+ $("change").textContent=d.day_change_percent==null?"Live change unavailable":"Change "+fmt(d.day_change_percent)+"%";
+ $("candles").textContent=d.candles_loaded??0;$("lastCandle").textContent="Last candle "+time(d.last_candle_time);
+ const m=d.strategies?.momentum||{},t=d.strategies?.trend||{},o=d.overall||{};
+ renderStrategy("momentum",m);renderStrategy("trend",t);setSignal("overall",o.signal);$("overallReason").textContent=o.reason||"—";
+ setSignal("combinedSignal",o.signal);$("combinedReason").textContent=o.reason||"—";levels("combinedLevels",o);
+ const rows=d.signals||[];$("history").innerHTML=rows.length?rows.map(s=>`<tr><td class="${cls(s.signal)}"><strong>${s.signal}</strong></td><td>${time(s.candle_time)}</td><td>${fmt(s.entry)}</td><td>${fmt(s.stop_loss)}</td><td>${fmt(s.target_1)}</td><td>${fmt(s.target_2)}</td><td>${s.reason||""}</td></tr>`).join(""):'<tr><td colspan="7" class="muted">No confirmed signals yet.</td></tr>';
+ $("message").textContent=d.message||"";
+ }catch(e){$("status").textContent="DASHBOARD ERROR";$("message").textContent="Could not fetch scanner state: "+e.message;$("message").className="note error"}}
+refresh();setInterval(refresh,2000);
+</script></body></html>
