@@ -122,10 +122,16 @@ def audit_candles(records: list[dict[str, Any]]) -> dict[str, Any]:
 
     errors = sum(issue["severity"] == "ERROR" for issue in issues)
     warnings = sum(issue["severity"] == "WARNING" for issue in issues)
-    valid_rows = int(
-        frame["timestamp"].notna().sum()
-        - frame["timestamp"].dropna().duplicated(keep=False).sum()
+    unique_timestamp_rows = ~frame["timestamp"].duplicated(keep=False)
+    valid_rows_mask = (
+        frame["timestamp"].notna()
+        & numeric_valid
+        & price_valid
+        & (frame["volume"] >= 0)
+        & ohlc_valid
+        & unique_timestamp_rows
     )
+    valid_rows = int(valid_rows_mask.sum())
     return {
         "status": "FAIL" if errors else ("WARN" if warnings else "PASS"),
         "rows": len(records),
