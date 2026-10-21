@@ -20,7 +20,7 @@ def candle(day: str, *, open_: float = 100, high: float = 105, low: float = 95,
 class DataQualityTests(unittest.TestCase):
     def test_clean_consecutive_weekdays_pass(self):
         result = audit_candles([
-            candle("2026-10-19"), candle("2026-10-20"), candle("2026-10-21")
+            candle("2026-10-12"), candle("2026-10-13"), candle("2026-10-14")
         ])
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["rows"], 3)
@@ -44,10 +44,24 @@ class DataQualityTests(unittest.TestCase):
         self.assertIn("NEGATIVE_VOLUME", codes)
         self.assertEqual(result["status"], "FAIL")
 
-    def test_weekday_gap_is_warning_not_assumed_exchange_holiday(self):
+    def test_known_exchange_holiday_is_not_reported_as_missing(self):
         result = audit_candles([candle("2026-10-19"), candle("2026-10-21")])
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["potential_missing_business_days"], [])
+
+    def test_unlisted_weekday_gap_remains_warning(self):
+        result = audit_candles([candle("2026-10-15"), candle("2026-10-19")])
         self.assertEqual(result["status"], "WARN")
-        self.assertIn("2026-10-20", result["potential_missing_business_days"])
+        self.assertIn("2026-10-16", result["potential_missing_business_days"])
+
+    def test_candle_on_full_day_exchange_holiday_is_error(self):
+        result = audit_candles([
+            candle("2026-10-19"), candle("2026-10-20"), candle("2026-10-21")
+        ])
+        self.assertEqual(result["status"], "FAIL")
+        self.assertTrue(any(
+            i["code"] == "CANDLES_ON_EXCHANGE_HOLIDAY" for i in result["issues"]
+        ))
 
     def test_empty_and_bad_file_shapes_fail(self):
         self.assertEqual(audit_candles([])["status"], "FAIL")
