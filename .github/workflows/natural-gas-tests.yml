@@ -1,0 +1,29 @@
+name: Natural Gas Signal Tests
+
+on:
+  pull_request:
+    paths:
+      - "app/commodities/natural_gas_*.py"
+      - "app/commodities/test_natural_gas_*.py"
+      - ".github/workflows/natural-gas-tests.yml"
+  push:
+    branches:
+      - "feature/mcx-natural-gas-signals"
+    paths:
+      - "app/commodities/natural_gas_*.py"
+      - "app/commodities/test_natural_gas_*.py"
+      - ".github/workflows/natural-gas-tests.yml"
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip numpy pandas
+      - name: Run Natural Gas unit tests
+        run: python -m unittest app.commodities.test_natural_gas_engine app.commodities.test_natural_gas_backtest

@@ -1,1 +1,4 @@
 .\.venv\Scripts\Activate.ps1
+python -m app.market.auth
+python -m app.options.live_chain
+https://kite.zerodha.com/connect/login?api_key=zvs14wgvj3ygtosr&v=3

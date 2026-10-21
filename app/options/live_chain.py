@@ -34,6 +34,13 @@ REPORT_INTERVAL_SECONDS = 10
 CANDIDATE_MAX_AGE_SECONDS = 30
 TOP_CANDIDATES = 3
 
+# Require a new ATM strike to remain stable before resubscribing.
+# This prevents rapid subscription churn when NIFTY oscillates around
+# a strike boundary.
+ATM_SWITCH_CONFIRM_SECONDS = 2.0
+pending_atm = None
+pending_atm_since = 0.0
+
 state_manager = OptionStateManager()
 
 greeks_service = GreeksService(
@@ -72,10 +79,13 @@ option_universe_synced = False
 
 def reset_subscription_state():
     global current_atm, current_expiry, option_universe_synced
+    global pending_atm, pending_atm_since
 
     current_atm = None
     current_expiry = None
     option_universe_synced = False
+    pending_atm = None
+    pending_atm_since = 0.0
 
     subscribed_option_tokens.clear()
     instrument_metadata.clear()
@@ -110,6 +120,7 @@ def subscribe_options_if_needed(ws, nifty_price):
     global current_atm, current_expiry
     global subscribed_option_tokens, instrument_metadata
     global option_universe_synced
+    global pending_atm, pending_atm_since
 
     if instrument_df is None:
         print("ERROR: Instrument master is not loaded.")
@@ -124,11 +135,31 @@ def subscribe_options_if_needed(ws, nifty_price):
 
     if (
             option_universe_synced
-            and current_atm == atm
             and current_expiry == expiry
+            and current_atm == atm
             and subscribed_option_tokens
     ):
+        pending_atm = None
+        pending_atm_since = 0.0
         return
+
+    # If only ATM changed, wait for the new strike to remain stable.
+    # Expiry changes are handled immediately.
+    if (
+            option_universe_synced
+            and current_expiry == expiry
+            and current_atm is not None
+            and current_atm != atm
+    ):
+        now = time.monotonic()
+
+        if pending_atm != atm:
+            pending_atm = atm
+            pending_atm_since = now
+            return
+
+        if now - pending_atm_since < ATM_SWITCH_CONFIRM_SECONDS:
+            return
 
     chain, expiry, atm = get_option_chain(
         nifty_price,
@@ -152,10 +183,9 @@ def subscribe_options_if_needed(ws, nifty_price):
 
     new_tokens = set(new_metadata)
 
-    # Fail closed during reconciliation. If an operation raises,
-    # old metadata and candidates cannot be used for scoring.
-    invalidate_option_universe()
-
+    # Keep the currently working universe and recent scores intact while
+    # reconciliation is in progress. If any SDK operation fails, the
+    # caller invalidates the universe in its exception handler.
     client_modes = _get_client_subscription_modes(ws)
     current_option_tokens = set(client_modes) - {NIFTY_50_TOKEN}
 
@@ -194,6 +224,8 @@ def subscribe_options_if_needed(ws, nifty_price):
     current_atm = atm
     current_expiry = expiry
     option_universe_synced = True
+    pending_atm = None
+    pending_atm_since = 0.0
 
     with candidate_lock:
         for token in list(latest_scores):
@@ -284,10 +316,8 @@ def process_option_tick(tick, metadata):
 
     if greeks is None:
         diagnostic_counts["greeks_failed"] += 1
-
-        with candidate_lock:
-            latest_scores.pop(token, None)
-
+        # Keep the last successful score until its normal stale timeout.
+        # A single failed IV/Greeks calculation should not erase it.
         return
 
     # Print only the first 10 successful Greek calculations.
@@ -354,9 +384,9 @@ def process_option_tick(tick, metadata):
         if result_status == "FILTERED":
             diagnostic_filtered_by_type[metadata["option_type"]] += 1
 
-        with candidate_lock:
-            latest_scores.pop(token, None)
-
+        # Do not erase a recent successful score because a later tick is
+        # temporarily insufficient or filtered. Its timestamp is not refreshed,
+        # so cleanup_stale_candidates() still expires it after 30 seconds.
         return
 
     diagnostic_counts["successful_scores"] += 1
@@ -366,6 +396,7 @@ def process_option_tick(tick, metadata):
 
     # Publish the latest score for this option.
     with candidate_lock:
+        is_new_candidate = token not in latest_scores
         latest_scores[token] = {
             "updated_at": time.monotonic(),
             "tradingsymbol": metadata["tradingsymbol"],
@@ -381,6 +412,19 @@ def process_option_tick(tick, metadata):
             "score": result["score"],
             "status": result["status"],
         }
+
+    if is_new_candidate:
+        print(
+            "SCORE ACCEPTED | "
+            f"{metadata['tradingsymbol']} | "
+            f"{metadata['option_type']} | "
+            f"Score={result['score']:.1f}/100 | "
+            f"{result['status']} | "
+            f"LTP={ltp:.2f} | "
+            f"IV={greeks['iv'] * 100:.2f}% | "
+            f"Delta={greeks['delta']:+.3f} | "
+            f"Gamma={greeks['gamma']:.6f}"
+        )
 
 
 def cleanup_stale_candidates():
@@ -554,6 +598,24 @@ def on_ticks(ws, ticks):
                         "Option-chain update failed; old candidates invalidated: "
                         f"{type(exc).__name__}: {exc}"
                     )
+
+                # Publish market data on every valid NIFTY tick, even when
+                # no option candidate has passed the scoring filters.
+                publish_snapshot({
+                    "market": {
+                        "nifty": current_nifty_price,
+                        "atm": current_atm,
+                        "expiry": (
+                            str(current_expiry)
+                            if current_expiry is not None
+                            else None
+                        ),
+                        "connected": True,
+                        "last_tick_time": datetime.now(IST).strftime(
+                            "%H:%M:%S IST"
+                        ),
+                    }
+                })
 
                 continue
 
