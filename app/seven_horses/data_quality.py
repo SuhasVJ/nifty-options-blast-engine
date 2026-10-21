@@ -140,7 +140,10 @@ def audit_candles(records: list[dict[str, Any]]) -> dict[str, Any]:
     if len(unique_dates) >= 2:
         expected = {
             day.date()
-            for day in pd.bdate_range(start=unique_dates[0], end=unique_dates[-1])
+            for day in pd.bdate_range(
+                start=unique_dates[0],
+                end=unique_dates[-1],
+            )
         }
         observed = set(unique_dates)
         known_holidays = {
@@ -151,6 +154,7 @@ def audit_candles(records: list[dict[str, Any]]) -> dict[str, Any]:
             day.isoformat()
             for day in sorted(expected - observed - known_holidays)
         ]
+
         if potential_gaps:
             issues.append({
                 "code": "POTENTIAL_MISSING_SESSIONS", "severity": "WARNING",
