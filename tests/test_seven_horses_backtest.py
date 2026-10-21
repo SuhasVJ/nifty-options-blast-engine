@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -54,6 +55,32 @@ class BacktestTests(unittest.TestCase):
         result = run_backtest(frame)
         self.assertEqual(result["trades"], 0)
         self.assertIn("error", result)
+
+
+    def test_end_of_data_exit_updates_final_equity_after_exit_costs(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="D")
+        frame = pd.DataFrame({
+            "open": [99.0, 100.0, 102.0, 103.0],
+            "high": [100.0, 104.0, 104.0, 104.0],
+            "low": [98.0, 99.0, 101.0, 102.0],
+            "close": [99.0, 102.0, 103.0, 103.5],
+            "volume": [1000.0] * 4,
+            "ema20": [98.0] * 4,
+            "ema50": [95.0] * 4,
+            "rsi14": [60.0] * 4,
+            "return20": [0.05] * 4,
+            "atr14": [2.0] * 4,
+            "relative_volume": [1.2] * 4,
+        }, index=index)
+
+        with patch("app.seven_horses.backtest.add_indicators", return_value=frame):
+            result = run_backtest(frame)
+
+        self.assertEqual(result["trades"], 1)
+        self.assertEqual(result["trades_detail"][0]["reason"], "END_OF_DATA")
+        final_equity = result["equity_curve"][-1]["equity"]
+        self.assertLess(final_equity, 103.5 / 100.0)
+        self.assertAlmostEqual(result["total_return_pct_approx"], round((final_equity - 1.0) * 100, 2))
 
     def test_return_is_consistent_with_final_equity_point(self):
         index = pd.date_range("2025-01-01", periods=100, freq="D")
