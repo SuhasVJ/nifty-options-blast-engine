@@ -1,0 +1,218 @@
+"""Long-only swing backtest with next-open execution and conservative stop ordering."""
+from __future__ import annotations
+
+import argparse
+import json
+
+import pandas as pd
+
+from .config import settings
+from .signals import add_indicators, load_candles
+
+
+def _close_trade(
+    trades: list[dict],
+    *,
+    entry_time: str,
+    exit_time: str,
+    entry_price: float,
+    exit_price: float,
+    quantity: float,
+    cost_rate: float,
+    reason: str,
+) -> float:
+    proceeds = quantity * exit_price * (1.0 - cost_rate)
+    invested = quantity * entry_price * (1.0 + cost_rate)
+    trades.append({
+        "entry_time": entry_time,
+        "exit_time": exit_time,
+        "entry_price": round(entry_price, 4),
+        "exit_price": round(exit_price, 4),
+        "pnl_fraction_of_entry_notional": round(
+            (proceeds - invested) / max(quantity * entry_price, 1e-12), 6
+        ),
+        "reason": reason,
+    })
+    return proceeds
+
+
+def run_backtest(
+    frame: pd.DataFrame,
+    fee_bps: float = 10.0,
+    slippage_bps: float = 5.0,
+    stop_atr: float = 2.0,
+    target_atr: float = 3.0,
+) -> dict:
+    """Backtest close-derived signals using the following session's open.
+
+    When a daily candle touches both stop and target, the stop is assumed first.
+    Gap-through stops fill at the session open, not at the more favorable stop
+    price. This is a simplified research model, not a broker fill simulator.
+    """
+    if fee_bps < 0 or slippage_bps < 0:
+        raise ValueError("fee_bps and slippage_bps must be non-negative.")
+    if stop_atr <= 0 or target_atr <= 0:
+        raise ValueError("stop_atr and target_atr must be positive.")
+
+    required = ["ema20", "ema50", "rsi14", "return20", "atr14", "relative_volume"]
+    df = add_indicators(frame).dropna(subset=required)
+    if len(df) < 3:
+        return {"trades": 0, "error": "Insufficient valid candles after indicator warm-up."}
+
+    cost_rate = (fee_bps + slippage_bps) / 10000.0
+    cash = 1.0
+    quantity = 0.0
+    entry_price = stop_price = target_price = 0.0
+    entry_time: str | None = None
+    trades: list[dict] = []
+    equity: list[dict] = [
+        {"timestamp": df.index[0].isoformat(), "equity": 1.0}
+    ]
+
+    for i in range(1, len(df)):
+        prev, bar = df.iloc[i - 1], df.iloc[i]
+        timestamp = df.index[i].isoformat()
+        open_price, high, low, close = (
+            float(bar["open"]), float(bar["high"]),
+            float(bar["low"]), float(bar["close"]),
+        )
+        exited_today = False
+
+        if quantity > 0:
+            exit_price = None
+            exit_reason = None
+
+            # Resting protective orders can be crossed by an opening gap.
+            # Stop is checked first if the open is outside either boundary.
+            if open_price <= stop_price:
+                exit_price, exit_reason = open_price, "GAP_STOP"
+            elif open_price >= target_price:
+                exit_price, exit_reason = open_price, "GAP_TARGET"
+            elif (
+                float(prev["close"]) < float(prev["ema50"])
+                or float(prev["ema20"]) < float(prev["ema50"])
+                or float(prev["rsi14"]) < 45
+            ):
+                exit_price, exit_reason = open_price, "SIGNAL_EXIT"
+            elif low <= stop_price:
+                exit_price, exit_reason = stop_price, "ATR_STOP"
+            elif high >= target_price:
+                exit_price, exit_reason = target_price, "ATR_TARGET"
+
+            if exit_price is not None:
+                assert entry_time is not None
+                cash = _close_trade(
+                    trades, entry_time=entry_time, exit_time=timestamp,
+                    entry_price=entry_price, exit_price=exit_price,
+                    quantity=quantity, cost_rate=cost_rate, reason=exit_reason,
+                )
+                quantity = 0.0
+                entry_price = stop_price = target_price = 0.0
+                entry_time = None
+                exited_today = True
+
+        # Do not re-enter on the same bar as an exit.
+        if quantity == 0 and not exited_today:
+            trend_up = float(prev["close"]) > float(prev["ema50"]) and float(prev["ema20"]) > float(prev["ema50"])
+            momentum_up = float(prev["return20"]) > 0 and 50 <= float(prev["rsi14"]) <= 70
+            volume_ok = float(prev["relative_volume"]) >= 1.0
+
+            if trend_up and momentum_up and volume_ok and open_price > 0:
+                entry_price = open_price
+                stop_price = max(entry_price - stop_atr * float(prev["atr14"]), entry_price * 0.5)
+                target_price = entry_price + target_atr * float(prev["atr14"])
+                quantity = cash / (entry_price * (1.0 + cost_rate))
+                cash = 0.0
+                entry_time = timestamp
+
+                # Entry-day risk checks. If both levels are touched, assume stop first.
+                entry_exit = None
+                entry_reason = None
+                if open_price <= stop_price or low <= stop_price:
+                    entry_exit = open_price if open_price <= stop_price else stop_price
+                    entry_reason = "ATR_STOP"
+                elif open_price >= target_price or high >= target_price:
+                    entry_exit = open_price if open_price >= target_price else target_price
+                    entry_reason = "ATR_TARGET"
+
+                if entry_exit is not None:
+                    assert entry_time is not None
+                    cash = _close_trade(
+                        trades, entry_time=entry_time, exit_time=timestamp,
+                        entry_price=entry_price, exit_price=entry_exit,
+                        quantity=quantity, cost_rate=cost_rate, reason=entry_reason,
+                    )
+                    quantity = 0.0
+                    entry_price = stop_price = target_price = 0.0
+                    entry_time = None
+
+        equity.append({"timestamp": timestamp, "equity": cash + quantity * close})
+
+    # Liquidate any open position at the last close, charge exit costs, and
+    # replace the last mark-to-market value so reported return includes liquidation.
+    if quantity > 0:
+        final_bar = df.iloc[-1]
+        assert entry_time is not None
+        cash = _close_trade(
+            trades, entry_time=entry_time, exit_time=df.index[-1].isoformat(),
+            entry_price=entry_price, exit_price=float(final_bar["close"]),
+            quantity=quantity, cost_rate=cost_rate, reason="END_OF_DATA",
+        )
+        quantity = 0.0
+        equity[-1]["equity"] = cash
+
+    values = pd.Series([point["equity"] for point in equity], dtype=float)
+    max_drawdown = float((values / values.cummax() - 1.0).min())
+    total_return = float(values.iloc[-1] - 1.0)
+
+    # Simple buy-and-hold benchmark over the same valid-candle window, before
+    # costs and dividends; shown only as context, not as a total-return index.
+    benchmark_return = float(df["close"].iloc[-1] / df["close"].iloc[0] - 1.0)
+    wins = [trade for trade in trades if trade["pnl_fraction_of_entry_notional"] > 0]
+    return {
+        "trades": len(trades),
+        "win_rate_pct": round(100 * len(wins) / len(trades), 2) if trades else 0.0,
+        "average_trade_pnl_pct": round(
+            100 * sum(t["pnl_fraction_of_entry_notional"] for t in trades) / len(trades), 3
+        ) if trades else 0.0,
+        "total_return_pct_approx": round(total_return * 100, 2),
+        "buy_and_hold_return_pct_approx": round(benchmark_return * 100, 2),
+        "max_drawdown_pct_approx": round(max_drawdown * 100, 2),
+        "fee_bps_per_side": fee_bps,
+        "slippage_bps_per_side": slippage_bps,
+        "stop_atr": stop_atr,
+        "target_atr": target_atr,
+        "equity_curve": equity,
+        "trades_detail": trades,
+        "method_note": (
+            "Research baseline only: single-position, fully invested, long-only; "
+            "next-open signal execution; gap-aware stop/target handling; stop-first "
+            "when both intraday levels are touched; end-of-data liquidation costs "
+            "included. Benchmark excludes dividends and costs. Taxes, market impact, "
+            "corporate-action adjustments, portfolio sizing, and out-of-sample validation "
+            "are not included. Not a trading recommendation."
+        ),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Backtest the Seven Horses swing baseline.")
+    parser.add_argument("--fee-bps", type=float, default=10.0, help="Estimated transaction cost in basis points per side.")
+    parser.add_argument("--slippage-bps", type=float, default=5.0, help="Estimated slippage in basis points per side.")
+    args = parser.parse_args()
+    summary = {}
+    for symbol in settings.symbols:
+        path = settings.data_dir / f"{symbol.lower()}_{settings.historical_interval}.json"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing history for {symbol}: run market_data history first.")
+        summary[symbol] = run_backtest(
+            load_candles(path), fee_bps=args.fee_bps, slippage_bps=args.slippage_bps
+        )
+    output = settings.data_dir / "backtest_summary.json"
+    output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(json.dumps(summary, indent=2))
+    print(f"Saved backtest to {output}")
+
+
+if __name__ == "__main__":
+    main()
