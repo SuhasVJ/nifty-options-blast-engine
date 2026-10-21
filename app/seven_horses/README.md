@@ -38,3 +38,22 @@ Data is written to data/seven_horses/. Run the stream during market hours and st
 
 ## Validation status
 The source slice has been committed to a feature branch. Live authentication and market-data validation must be run on the user's machine because this environment does not have the user's local .env or authenticated Kite session. Run the check command first; proceed only when all seven symbols resolve.
+
+
+## Signal research and baseline backtest
+
+After a successful history download, run the explainable indicator model:
+
+    python -m app.seven_horses.signals
+
+It writes data/seven_horses/latest_signals.json. Rules use EMA20/EMA50, 20-day return, RSI(14), ATR(14) and volume relative to its 20-day average. Output labels are research states, not personalized investment advice.
+
+Run the baseline long-only swing backtest:
+
+    python -m app.seven_horses.backtest
+
+Optional cost assumptions (basis points per side):
+
+    python -m app.seven_horses.backtest --fee-bps 10 --slippage-bps 5
+
+It writes data/seven_horses/backtest_summary.json. It uses close-derived signals at the next session open, includes ATR stop/target logic, and conservatively assumes stop-first when daily OHLC touches both stop and target. This is a first research baseline, not production-grade validation: review the trade log, costs, corporate actions, benchmark comparison, and walk-forward results before relying on metrics. Do not use its output as a direct order instruction.
