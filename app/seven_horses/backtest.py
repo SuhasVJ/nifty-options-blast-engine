@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import pandas as pd
 
 from .config import settings
@@ -12,16 +11,16 @@ from .signals import add_indicators, load_candles
 
 def run_backtest(frame: pd.DataFrame, fee_bps: float = 10.0, slippage_bps: float = 5.0,
                  stop_atr: float = 2.0, target_atr: float = 3.0) -> dict:
-    """Test signals without look-ahead: close signal executes at next bar open.
+    """Test close-derived signals at the next open; no same-bar look-ahead.
 
-    If a daily bar touches both stop and target, the stop is assumed to hit first.
-    Costs are charged on entry and exit. This baseline does not model taxes or impact.
+    If stop and target are both touched in one daily candle, assume stop first.
+    Costs are charged on each entry and exit. This baseline omits taxes and impact.
     """
     df = add_indicators(frame).dropna(subset=["ema20", "ema50", "rsi14", "return20", "atr14", "relative_volume"])
     if len(df) < 3:
         return {"trades": 0, "error": "Insufficient valid candles after indicator warm-up."}
 
-    cash = 1.0
+    cash = 1.0  # normalized starting equity
     quantity = 0.0
     entry_price = stop_price = target_price = 0.0
     entry_time = None
@@ -29,27 +28,31 @@ def run_backtest(frame: pd.DataFrame, fee_bps: float = 10.0, slippage_bps: float
     equity = []
     cost_rate = (fee_bps + slippage_bps) / 10000.0
 
-    # Signal is calculated using the previous completed candle, then acted on at today's open.
     for i in range(1, len(df)):
-        prev = df.iloc[i - 1]
+        prev = df.iloc[i - 1]  # latest completed bar available before today's open
         bar = df.iloc[i]
         timestamp = df.index[i].isoformat()
+        exited_today = False
 
-        # Existing position: conservative intraday stop/target checks.
         exit_price = None
         exit_reason = None
         if quantity > 0:
-            if bar["low"] <= stop_price:
-                exit_price, exit_reason = stop_price, "ATR_STOP"
-            elif bar["high"] >= target_price:
-                exit_price, exit_reason = target_price, "ATR_TARGET"
-            elif (prev["close"] < prev["ema50"] or prev["ema20"] < prev["ema50"] or prev["rsi14"] < 45):
+            # Exit signals known at yesterday's close execute at today's open.
+            if prev["close"] < prev["ema50"] or prev["ema20"] < prev["ema50"] or prev["rsi14"] < 45:
                 exit_price, exit_reason = float(bar["open"]), "SIGNAL_EXIT"
+            else:
+                # Daily OHLC cannot reveal stop/target order; assume stop wins if both touched.
+                if float(bar["open"]) <= stop_price or float(bar["low"]) <= stop_price:
+                    exit_price = min(float(bar["open"]), stop_price) if float(bar["open"]) < stop_price else stop_price
+                    exit_reason = "ATR_STOP"
+                elif float(bar["open"]) >= target_price or float(bar["high"]) >= target_price:
+                    exit_price = max(float(bar["open"]), target_price) if float(bar["open"]) > target_price else target_price
+                    exit_reason = "ATR_TARGET"
 
             if exit_price is not None:
                 proceeds = quantity * exit_price * (1 - cost_rate)
-                pnl = proceeds - (quantity * entry_price * (1 + cost_rate))
-                cash = cash + proceeds
+                pnl = proceeds - quantity * entry_price * (1 + cost_rate)
+                cash += proceeds
                 trades.append({
                     "entry_time": entry_time, "exit_time": timestamp,
                     "entry_price": round(entry_price, 4), "exit_price": round(float(exit_price), 4),
@@ -59,9 +62,10 @@ def run_backtest(frame: pd.DataFrame, fee_bps: float = 10.0, slippage_bps: float
                 quantity = 0.0
                 entry_price = stop_price = target_price = 0.0
                 entry_time = None
+                exited_today = True
 
-        # Enter at today's open only if the previous completed candle had a buy signal.
-        if quantity == 0:
+        # A position exited during today's bar cannot be re-opened retroactively at today's open.
+        if quantity == 0 and not exited_today:
             trend_up = prev["close"] > prev["ema50"] and prev["ema20"] > prev["ema50"]
             momentum_up = prev["return20"] > 0 and 50 <= prev["rsi14"] <= 70
             volume_ok = prev["relative_volume"] >= 1.0
@@ -75,10 +79,31 @@ def run_backtest(frame: pd.DataFrame, fee_bps: float = 10.0, slippage_bps: float
                 cash = 0.0
                 entry_time = timestamp
 
-        marked_equity = cash + (quantity * float(bar["close"]) if quantity > 0 else 0.0)
-        equity.append({"timestamp": timestamp, "equity": marked_equity})
+                # Include entry-day stop/target checks; stop takes priority if both are touched.
+                if float(bar["open"]) <= stop_price or float(bar["low"]) <= stop_price:
+                    exit_price = min(float(bar["open"]), stop_price) if float(bar["open"]) < stop_price else stop_price
+                    exit_reason = "ATR_STOP"
+                elif float(bar["open"]) >= target_price or float(bar["high"]) >= target_price:
+                    exit_price = max(float(bar["open"]), target_price) if float(bar["open"]) > target_price else target_price
+                    exit_reason = "ATR_TARGET"
+                else:
+                    exit_price = None
+                if exit_price is not None:
+                    proceeds = quantity * exit_price * (1 - cost_rate)
+                    pnl = proceeds - quantity * entry_price * (1 + cost_rate)
+                    trades.append({
+                        "entry_time": entry_time, "exit_time": timestamp,
+                        "entry_price": round(entry_price, 4), "exit_price": round(float(exit_price), 4),
+                        "pnl_fraction_of_entry_notional": round(pnl / max(quantity * entry_price, 1e-12), 6),
+                        "reason": exit_reason,
+                    })
+                    cash = proceeds
+                    quantity = 0.0
+                    entry_price = stop_price = target_price = 0.0
+                    entry_time = None
 
-    # Liquidate any open position at final close for reporting only.
+        equity.append({"timestamp": timestamp, "equity": cash + quantity * float(bar["close"])})
+
     if quantity > 0:
         final_bar = df.iloc[-1]
         exit_price = float(final_bar["close"])
@@ -93,16 +118,13 @@ def run_backtest(frame: pd.DataFrame, fee_bps: float = 10.0, slippage_bps: float
         cash = proceeds
         quantity = 0.0
 
-    returns = pd.Series([point["equity"] for point in equity], dtype=float)
-    if not returns.empty:
-        peak = returns.cummax()
-        drawdown = returns / peak - 1.0
-        max_drawdown = float(drawdown.min())
-        total_return = float(returns.iloc[-1] - 1.0)
+    values = pd.Series([point["equity"] for point in equity], dtype=float)
+    if not values.empty:
+        max_drawdown = float((values / values.cummax() - 1.0).min())
+        total_return = float(values.iloc[-1] - 1.0)
     else:
         max_drawdown, total_return = 0.0, 0.0
     wins = [trade for trade in trades if trade["pnl_fraction_of_entry_notional"] > 0]
-    losses = [trade for trade in trades if trade["pnl_fraction_of_entry_notional"] <= 0]
     return {
         "trades": len(trades),
         "win_rate_pct": round(100 * len(wins) / len(trades), 2) if trades else 0.0,
@@ -114,7 +136,7 @@ def run_backtest(frame: pd.DataFrame, fee_bps: float = 10.0, slippage_bps: float
         "stop_atr": stop_atr,
         "target_atr": target_atr,
         "trades_detail": trades,
-        "method_note": "Baseline research only; single-position, fully-invested long-only simulation. Equity curve is close-marked and simplified; validate before relying on results.",
+        "method_note": "Baseline research only; single-position, fully-invested long-only simulation. Daily OHLC stop ordering is conservative, but the simplified model requires further validation.",
     }
 
 
