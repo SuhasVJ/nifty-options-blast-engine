@@ -30,14 +30,17 @@ class HybridSizingTests(unittest.TestCase):
         self.assertLessEqual(sum(weights), 75.0)
         self.assertAlmostEqual(sum(weights), 75.0, places=1)
 
-    def test_buy_watch_gets_less_signal_strength_than_confirmed(self):
+    def test_confirmed_signal_scores_above_watch_signal_in_mixed_universe(self):
         signals = {
             "A": {"signal": "BUY_CONFIRMED"},
             "B": {"signal": "BUY_WATCH"},
+            "C": {"signal": "BUY_WATCH"},
+            "D": {"signal": "BUY_WATCH"},
         }
-        result = calculate_allocations(signals, {"A": 1_000_000, "B": 1_000_000})
+        result = calculate_allocations(signals, {symbol: 1_000_000 for symbol in signals})
         rows = result["symbols"]
         self.assertGreater(rows["A"]["signal_strength"], rows["B"]["signal_strength"])
+        self.assertGreater(rows["A"]["composite_score"], rows["B"]["composite_score"])
         self.assertGreater(rows["A"]["target_weight_pct"], rows["B"]["target_weight_pct"])
 
     def test_rejects_invalid_component_weights(self):
