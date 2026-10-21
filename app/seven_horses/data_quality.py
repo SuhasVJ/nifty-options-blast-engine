@@ -1,7 +1,8 @@
 """Audit Seven Horses historical OHLCV files without modifying source data.
 
-This is a diagnostic report, not a corporate-action adjustment engine. Business-day
-gaps are flagged as candidates because NSE holidays are not encoded in this simple audit.
+The exchange calendar is a version-controlled snapshot of NSE Capital Market
+(Equities) full-day closures. Special Muhurat trading sessions are not treated as
+full-day closures. Corporate-action adjustment is outside this audit's scope.
 """
 from __future__ import annotations
 
@@ -16,6 +17,18 @@ import pandas as pd
 from .config import settings
 
 REQUIRED_FIELDS = ("timestamp", "open", "high", "low", "close", "volume")
+HOLIDAY_CALENDAR_PATH = Path(__file__).with_name("nse_equity_holidays.json")
+HOLIDAY_CALENDAR = json.loads(HOLIDAY_CALENDAR_PATH.read_text(encoding="utf-8"))
+NSE_EQUITY_HOLIDAYS = {
+    date.fromisoformat(item["date"]): item["description"]
+    for item in HOLIDAY_CALENDAR["holidays"]
+}
+CALENDAR_METADATA = {
+    "exchange": HOLIDAY_CALENDAR["exchange"],
+    "segment": HOLIDAY_CALENDAR["segment"],
+    "coverage": HOLIDAY_CALENDAR["coverage"],
+    "source_urls": HOLIDAY_CALENDAR["source_urls"],
+}
 
 
 def audit_candles(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -28,6 +41,7 @@ def audit_candles(records: list[dict[str, Any]]) -> dict[str, Any]:
                  "message": "No candle records were provided."}
             ],
             "date_range": None, "potential_missing_business_days": [],
+            "holiday_calendar": CALENDAR_METADATA,
         }
 
     missing_fields = sum(
@@ -47,7 +61,10 @@ def audit_candles(records: list[dict[str, Any]]) -> dict[str, Any]:
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
     if "timestamp" not in frame:
         frame["timestamp"] = pd.NaT
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True)
+    frame["timestamp"] = (
+        pd.to_datetime(frame["timestamp"], errors="coerce", utc=True)
+        .dt.tz_convert("Asia/Kolkata")
+    )
 
     bad_timestamp = int(frame["timestamp"].isna().sum())
     if bad_timestamp:
@@ -107,17 +124,41 @@ def audit_candles(records: list[dict[str, Any]]) -> dict[str, Any]:
         })
 
     unique_dates = sorted(set(valid_timestamps.dt.date))
+    observed_holidays = sorted(day for day in set(unique_dates) if day in NSE_EQUITY_HOLIDAYS)
+    if observed_holidays:
+        dates_text = ", ".join(day.isoformat() for day in observed_holidays)
+        issues.append({
+            "code": "CANDLES_ON_EXCHANGE_HOLIDAY", "severity": "ERROR",
+            "count": len(observed_holidays),
+            "message": (
+                "Candles fall on dates listed as full-day NSE equity-market closures: "
+                f"{dates_text}. Verify source timestamps and the holiday calendar."
+            ),
+        })
+
     potential_gaps: list[str] = []
     if len(unique_dates) >= 2:
-        # Weekends excluded. Exchange holidays are unknown here, so these are candidates only.
-        expected = pd.bdate_range(start=unique_dates[0], end=unique_dates[-1]).date
+        expected = {
+            day.date()
+            for day in pd.bdate_range(start=unique_dates[0], end=unique_dates[-1])
+        }
         observed = set(unique_dates)
-        potential_gaps = [day.isoformat() for day in expected if day not in observed]
+        known_holidays = {
+            day for day in NSE_EQUITY_HOLIDAYS
+            if unique_dates[0] <= day <= unique_dates[-1]
+        }
+        potential_gaps = [
+            day.isoformat()
+            for day in sorted(expected - observed - known_holidays)
+        ]
         if potential_gaps:
             issues.append({
                 "code": "POTENTIAL_MISSING_SESSIONS", "severity": "WARNING",
                 "count": len(potential_gaps),
-                "message": "Weekdays without candles; confirm against the NSE holiday calendar before treating as missing data.",
+                "message": (
+                    "Weekdays without candles after excluding weekends and the versioned "
+                    "NSE equity holiday calendar; verify against official circulars."
+                ),
             })
 
     errors = sum(issue["severity"] == "ERROR" for issue in issues)
@@ -142,6 +183,7 @@ def audit_candles(records: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "potential_missing_business_days": potential_gaps,
         "issues": issues,
+        "holiday_calendar": CALENDAR_METADATA,
         "corporate_actions": {
             "status": "NOT_CHECKED",
             "note": "This audit cannot verify split/bonus adjustments or total-return treatment. Check corporate actions and price-adjustment policy separately.",
