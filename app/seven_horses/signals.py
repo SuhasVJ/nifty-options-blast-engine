@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 import pandas as pd
-
+from datetime import time as datetime_time
 from .config import settings
 
 LOG = logging.getLogger("seven_horses.signals")
@@ -22,6 +22,37 @@ def load_candles(path: Path) -> pd.DataFrame:
     frame = frame.sort_values("timestamp").drop_duplicates("timestamp").set_index("timestamp")
     return frame
 
+def completed_daily_candles(
+    frame: pd.DataFrame,
+    now=None,
+) -> pd.DataFrame:
+    """Exclude today's daily candle until the session has had time to finalize."""
+    if frame.empty:
+        return frame.copy()
+
+    current = (
+        pd.Timestamp.now(tz="Asia/Kolkata")
+        if now is None
+        else pd.Timestamp(now)
+    )
+
+    if current.tzinfo is None:
+        current = current.tz_localize("Asia/Kolkata")
+    else:
+        current = current.tz_convert("Asia/Kolkata")
+
+    index = pd.DatetimeIndex(frame.index)
+    if index.tz is None:
+        index = index.tz_localize("Asia/Kolkata")
+    else:
+        index = index.tz_convert("Asia/Kolkata")
+
+    # Allow a 30-minute buffer after the NSE cash-market close.
+    if current.time() < datetime_time(16, 0):
+        keep = index.date < current.date()
+        return frame.loc[keep].copy()
+
+    return frame.copy()
 
 def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     """Compute close-of-day indicators. Signals are for research, not advice."""
@@ -97,17 +128,38 @@ def classify_latest(df: pd.DataFrame) -> dict:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
     output = {}
+
     for symbol in settings.symbols:
-        path = settings.data_dir / f"{symbol.lower()}_{settings.historical_interval}.json"
+        path = (
+                settings.data_dir
+                / f"{symbol.lower()}_{settings.historical_interval}.json"
+        )
+
         if not path.exists():
-            raise FileNotFoundError(f"Missing history for {symbol}: run market_data history first.")
-        df = add_indicators(load_candles(path))
+            raise FileNotFoundError(f"Missing candle data: {path}")
+
+        candles = load_candles(path)
+        candles = completed_daily_candles(candles)
+        df = add_indicators(candles)
         output[symbol] = classify_latest(df)
-        LOG.info("%s: %s", symbol, output[symbol]["signal"])
+
+        LOG.info(
+            "%s: %s",
+            symbol,
+            output[symbol].get("signal", "UNKNOWN"),
+        )
+
     destination = settings.data_dir / "latest_signals.json"
-    destination.write_text(json.dumps(output, indent=2), encoding="utf-8")
+    destination.write_text(
+        json.dumps(output, indent=2),
+        encoding="utf-8",
+    )
+
     print(json.dumps(output, indent=2))
     print(f"Saved signals to {destination}")
 

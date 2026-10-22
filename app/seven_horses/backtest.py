@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import date
 
 import pandas as pd
 
 from .config import settings
-from .signals import add_indicators, load_candles
+from .signals import add_indicators, completed_daily_candles, load_candles
 
 
 def _close_trade(
@@ -42,6 +43,7 @@ def run_backtest(
     slippage_bps: float = 5.0,
     stop_atr: float = 2.0,
     target_atr: float = 3.0,
+    end_date: date | None = None,
 ) -> dict:
     """Backtest close-derived signals using the following session's open.
 
@@ -54,8 +56,18 @@ def run_backtest(
     if stop_atr <= 0 or target_atr <= 0:
         raise ValueError("stop_atr and target_atr must be positive.")
 
+    if end_date is not None:
+        # Historical backtests use an inclusive calendar-date cutoff,
+        # independent of the current clock.
+        cutoff = pd.Timestamp(end_date).date()
+        candles = frame.loc[
+            pd.DatetimeIndex(frame.index).date <= cutoff
+        ].copy()
+    else:
+        # Without an explicit cutoff, retain live completed-candle policy.
+        candles = completed_daily_candles(frame)
     required = ["ema20", "ema50", "rsi14", "return20", "atr14", "relative_volume"]
-    df = add_indicators(frame).dropna(subset=required)
+    df = add_indicators(candles).dropna(subset=required)
     if len(df) < 3:
         return {"trades": 0, "error": "Insufficient valid candles after indicator warm-up."}
 
@@ -146,7 +158,9 @@ def run_backtest(
                     entry_price = stop_price = target_price = 0.0
                     entry_time = None
 
-        equity.append({"timestamp": timestamp, "equity": cash + quantity * close})
+        # Mark open positions at estimated liquidation value, including exit costs.
+        marked_equity = cash + quantity * close * (1.0 - cost_rate)
+        equity.append({"timestamp": timestamp, "equity": marked_equity})
 
     # Liquidate any open position at the last close, charge exit costs, and
     # replace the last mark-to-market value so reported return includes liquidation.
@@ -199,6 +213,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest the Seven Horses swing baseline.")
     parser.add_argument("--fee-bps", type=float, default=10.0, help="Estimated transaction cost in basis points per side.")
     parser.add_argument("--slippage-bps", type=float, default=5.0, help="Estimated slippage in basis points per side.")
+    parser.add_argument("--end-date", type=date.fromisoformat, help="Inclusive historical cutoff date (YYYY-MM-DD).")
     args = parser.parse_args()
     summary = {}
     for symbol in settings.symbols:
@@ -206,7 +221,8 @@ def main() -> None:
         if not path.exists():
             raise FileNotFoundError(f"Missing history for {symbol}: run market_data history first.")
         summary[symbol] = run_backtest(
-            load_candles(path), fee_bps=args.fee_bps, slippage_bps=args.slippage_bps
+            load_candles(path), fee_bps=args.fee_bps,
+            slippage_bps=args.slippage_bps, end_date=args.end_date
         )
     output = settings.data_dir / "backtest_summary.json"
     output.write_text(json.dumps(summary, indent=2), encoding="utf-8")

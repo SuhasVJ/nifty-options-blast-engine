@@ -103,5 +103,94 @@ class BacktestTests(unittest.TestCase):
         self.assertIn("buy_and_hold_return_pct_approx", result)
 
 
+    def test_open_position_equity_reserves_exit_costs(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="D")
+        frame = pd.DataFrame({
+            "open": [99.0, 100.0, 102.0, 103.0],
+            "high": [100.0, 101.0, 103.0, 104.0],
+            "low": [98.0, 99.5, 101.0, 102.0],
+            "close": [99.0, 100.5, 102.5, 103.5],
+            "volume": [1000.0] * 4,
+            "ema20": [98.0] * 4,
+            "ema50": [95.0] * 4,
+            "rsi14": [60.0] * 4,
+            "return20": [0.05] * 4,
+            "atr14": [10.0] * 4,
+            "relative_volume": [1.2] * 4,
+        }, index=index)
+
+        fee_bps = 10.0
+        slippage_bps = 5.0
+        cost_rate = (fee_bps + slippage_bps) / 10000.0
+
+        with patch("app.seven_horses.backtest.add_indicators", return_value=frame):
+            result = run_backtest(
+                frame, fee_bps=fee_bps, slippage_bps=slippage_bps
+            )
+
+        curve = result["equity_curve"]
+        # Entry occurs on the second bar; position remains open before final liquidation.
+        entry_price = frame.iloc[1]["open"]
+        quantity = 1.0 / (entry_price * (1.0 + cost_rate))
+        expected_mark = quantity * frame.iloc[2]["close"] * (1.0 - cost_rate)
+
+        self.assertAlmostEqual(curve[2]["equity"], expected_mark, places=8)
+        self.assertEqual(result["trades_detail"][-1]["reason"], "END_OF_DATA")
+        self.assertAlmostEqual(
+            result["total_return_pct_approx"],
+            round((curve[-1]["equity"] - 1.0) * 100, 2),
+        )
+
+    def test_end_date_is_inclusive_and_allows_holiday_gap(self):
+        from datetime import date
+
+        index = pd.to_datetime([
+            "2026-10-15",
+            "2026-10-16",
+            "2026-10-19",
+            # 2026-10-20 is a market holiday: no candle expected.
+            "2026-10-21",
+            "2026-10-22",
+        ]).tz_localize("Asia/Kolkata")
+
+        close = pd.Series([100., 101., 102., 103., 104.], index=index)
+        frame = pd.DataFrame({
+            "open": close,
+            "high": close + 2,
+            "low": close - 2,
+            "close": close,
+            "volume": 1000.,
+            "ema20": 99.,
+            "ema50": 98.,
+            "rsi14": 60.,
+            "return20": 0.05,
+            "atr14": 2.,
+            "relative_volume": 1.2,
+        }, index=index)
+
+        captured = {}
+
+        def inspect_indicators(candles):
+            captured["dates"] = [d.date().isoformat() for d in candles.index]
+            return candles
+
+        with patch(
+            "app.seven_horses.backtest.add_indicators",
+            side_effect=inspect_indicators,
+        ):
+            result = run_backtest(frame, end_date=date(2026, 10, 20))
+
+        self.assertEqual(
+            captured["dates"],
+            ["2026-10-15", "2026-10-16", "2026-10-19"],
+        )
+        curve = result.get("equity_curve", [])
+        self.assertTrue(curve)
+        self.assertEqual(curve[-1]["timestamp"][:10], "2026-10-19")
+        self.assertTrue(
+            all(point["timestamp"][:10] <= "2026-10-20" for point in curve)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
